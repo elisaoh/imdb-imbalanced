@@ -1,6 +1,6 @@
 # Dataset files
 *.csv
-./DS_Store
+.DS_Store
 
 
 
