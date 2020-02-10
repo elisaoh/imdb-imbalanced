@@ -112,7 +112,6 @@ class Vocabulary(object):
         return len(self._token_to_idx)
 
 
-
 class SequenceVocabulary(Vocabulary):
     def __init__(self, token_to_idx=None, unk_token="<UNK>",
                  mask_token="<MASK>", begin_seq_token="<BEGIN>",
@@ -156,31 +155,37 @@ class SequenceVocabulary(Vocabulary):
             return self._token_to_idx[token]
 
 
+
 class ReviewVectorizer(object):
     """ The Vectorizer which coordinates the Vocabularies and puts them to use"""
     def __init__(self, review_vocab, rating_vocab):
     	self.review_vocab = review_vocab
     	self.rating_vocab = rating_vocab
 
-	def vectorize(self, review):
-		     """Create a collapsed one-hit vector for the review
-        
-        Args:
-            review (str): the review 
-        Returns:
-            one_hot (np.ndarray): the collapsed one-hot encoding 
+    def vectorize(self, review, vector_length=-1):
         """
-        one_hot = np.zeros(len(self.review_vocab), dtype=np.float32)
-        
-        for token in review.split(" "):
-            if token not in string.punctuation:
-                one_hot[self.review_vocab.lookup_token(token)] = 1
+        Args:
+            review (str): the string of words separated by a space
+            vector_length (int): an argument for forcing the length of index vector
+        Returns:
+            the vetorized title (numpy.array)
+        """
+        indices = [self.review_vocab.begin_seq_index]
+        indices.extend(self.review_vocab.lookup_token(token) 
+                       for token in review.split(" "))
+        indices.append(self.review_vocab.end_seq_index)
 
-        return one_hot
+        if vector_length < 0:
+            vector_length = len(indices)
+
+        out_vector = np.zeros(vector_length, dtype=np.int64)
+        out_vector[:len(indices)] = indices
+        out_vector[len(indices):] = self.review_vocab.mask_index
+
+        return out_vector
 
     @classmethod
     def from_dataframe(cls, review_df, cutoff = 10):
-    	review_vocab = Vocabulary(add_unk = True)
     	rating_vocab = Vocabulary(token_to_idx = {'neg': 0, 'pos': 1}, add_unk = False)
 
     	word_counts = Counter()
@@ -189,13 +194,14 @@ class ReviewVectorizer(object):
     			if word not in string.punctuation:
     				word_counts[word] += 1
 
-        for word, count in word_counts.items():
-        	if count > cutoff:
-                review_vocab.add_token(word)
+    	review_vocab = SequenceVocabulary()
+    	for word, word_count in word_counts.items():
+        	if word_count >= cutoff:
+        		review_vocab.add_token(word)
 
-        return cls(review_vocab, rating_vocab)
+    	return cls(review_vocab, rating_vocab)
 
-  	@classmethod
+    @classmethod
     def from_serializable(cls, contents):
         """Instantiate a ReviewVectorizer from a serializable dictionary
         
@@ -219,25 +225,28 @@ class ReviewVectorizer(object):
                 'rating_vocab': self.rating_vocab.to_serializable()}
 
 
+class NewsDataset(Dataset):
+    def __init__(self, news_df, vectorizer):
+        """
+        Args:
+            news_df (pandas.DataFrame): the dataset
+            vectorizer (NewsVectorizer): vectorizer instatiated from dataset
+        """
+        self.news_df = news_df
+        self._vectorizer = vectorizer
 
+        # +1 if only using begin_seq, +2 if using both begin and end seq tokens
+        measure_len = lambda context: len(context.split(" "))
+        self._max_seq_length = max(map(measure_len, news_df.review)) + 2
+        
 
+        self.train_df = self.news_df[self.news_df.split=='train']
+        self.train_size = len(self.train_df)
 
-
-
-
-class ReviewDataset(Dataset):
-	def __init__(self, review_df, vectorizer):
-		self.review_df = refview_df
-		self._vectorizer = vectorizer
-		
-		self.train_df = self.review_df[self.review_df.split=="train"]
-		self.train_size = len(self.train_df)
-
-
-        self.val_df = self.review_df[self.review_df.split=='val']
+        self.val_df = self.news_df[self.news_df.split=='val']
         self.validation_size = len(self.val_df)
 
-        self.test_df = self.review_df[self.review_df.split=='test']
+        self.test_df = self.news_df[self.news_df.split=='test']
         self.test_size = len(self.test_df)
 
         self._lookup_dict = {'train': (self.train_df, self.train_size),
@@ -246,18 +255,42 @@ class ReviewDataset(Dataset):
 
         self.set_split('train')
 
+        # Class weights
+        class_counts = news_df.rating.value_counts().to_dict()
+        def sort_key(item):
+            return self._vectorizer.rating_vocab.lookup_token(item[0])
+        sorted_counts = sorted(class_counts.items(), key=sort_key)
+        frequencies = [count for _, count in sorted_counts]
+        self.class_weights = 1.0 / torch.tensor(frequencies, dtype=torch.float32)
+        
+        
     @classmethod
-    def load_dataset_and_make_vectorizer(cls, review_csv):
+    def load_dataset_and_make_vectorizer(cls, news_csv):
         """Load dataset and make a new vectorizer from scratch
         
         Args:
-            review_csv (str): location of the dataset
+            surname_csv (str): location of the dataset
         Returns:
-            an instance of ReviewDataset
+            an instance of SurnameDataset
         """
-        review_df = pd.read_csv(review_csv)
-        train_review_df = review_df[review_df.split=='train']
-        return cls(review_df, ReviewVectorizer.from_dataframe(train_review_df))
+        news_df = pd.read_csv(news_csv)
+        train_news_df = news_df[news_df.split=='train']
+        return cls(news_df, ReviewVectorizer.from_dataframe(train_news_df))
+
+    @classmethod
+    def load_dataset_and_load_vectorizer(cls, news_csv, vectorizer_filepath):
+        """Load dataset and the corresponding vectorizer. 
+        Used in the case in the vectorizer has been cached for re-use
+        
+        Args:
+            surname_csv (str): location of the dataset
+            vectorizer_filepath (str): location of the saved vectorizer
+        Returns:
+            an instance of SurnameDataset
+        """
+        news_df = pd.read_csv(news_csv)
+        vectorizer = cls.load_vectorizer_only(vectorizer_filepath)
+        return cls(news_csv, vectorizer)
 
     @staticmethod
     def load_vectorizer_only(vectorizer_filepath):
@@ -266,10 +299,10 @@ class ReviewDataset(Dataset):
         Args:
             vectorizer_filepath (str): the location of the serialized vectorizer
         Returns:
-            an instance of ReviewVectorizer
+            an instance of SurnameVectorizer
         """
         with open(vectorizer_filepath) as fp:
-            return ReviewVectorizer.from_serializable(json.load(fp))
+            return NameVectorizer.from_serializable(json.load(fp))
 
     def save_vectorizer(self, vectorizer_filepath):
         """saves the vectorizer to disk using json
@@ -285,33 +318,49 @@ class ReviewDataset(Dataset):
         return self._vectorizer
 
     def set_split(self, split="train"):
-        """ selects the splits in the dataset using a column in the dataframe 
-        
-        Args:
-            split (str): one of "train", "val", or "test"
-        """
+        """ selects the splits in the dataset using a column in the dataframe """
         self._target_split = split
         self._target_df, self._target_size = self._lookup_dict[split]
 
     def __len__(self):
-    	return self._target_size
+        return self._target_size
 
-	def __getitem__(self, index):
-		row = self._target_df.iloc[index]
+    def __getitem__(self, index):
+        """the primary entry point method for PyTorch datasets
+        
+        Args:
+            index (int): the index to the data point 
+        Returns:
+            a dictionary holding the data point's features (x_data) and label (y_target)
+        """
+        row = self._target_df.iloc[index]
 
-		review_vector = self._vectorizer(row.review)
-		rating_index = self._vectorizer.rating_vocab.lookup_token(row.rating)
+        review_vector = \
+            self._vectorizer.vectorize(row.review, self._max_seq_length)
 
-		return{'x_data': review_vector,
-				'y_target': rating_index}
+        rating_index = \
+            self._vectorizer.rating_vocab.lookup_token(row.rating)
 
-	def get_num_batches(self, batch_size):
-		return len(self) // batch_size
+        return {'x_data': review_vector,
+                'y_target': rating_index}
 
+    def get_num_batches(self, batch_size):
+        """Given a batch size, return the number of batches in the dataset
+        
+        Args:
+            batch_size (int)
+        Returns:
+            number of batches in the dataset
+        """
+        return len(self) // batch_size
 
-def generate_batches(dataset, batch_size, shuffle=True, drop_last=True, device="cpu"):
-
-	dataloader = DataLoader(dataset=dataset, batch_size=batch_size,
+def generate_batches(dataset, batch_size, shuffle=True,
+                     drop_last=True, device="cpu"): 
+    """
+    A generator function which wraps the PyTorch DataLoader. It will 
+      ensure each tensor is on the write device location.
+    """
+    dataloader = DataLoader(dataset=dataset, batch_size=batch_size,
                             shuffle=shuffle, drop_last=drop_last)
 
     for data_dict in dataloader:
@@ -319,7 +368,6 @@ def generate_batches(dataset, batch_size, shuffle=True, drop_last=True, device="
         for name, tensor in data_dict.items():
             out_data_dict[name] = data_dict[name].to(device)
         yield out_data_dict
-
 
 
 
