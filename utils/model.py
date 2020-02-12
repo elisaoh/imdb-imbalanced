@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
+import csv
 
 
 
@@ -92,7 +93,12 @@ class NewsClassifier(nn.Module):
         
         # mlp classifier
         intermediate_vector = F.relu(F.dropout(self.fc1(features), p=self._dropout_p))
+        # print(intermediate_vector)
+        with open("data/features.csv","a",newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(intermediate_vector.detach().numpy())
         prediction_vector = self.fc2(intermediate_vector)
+        # print(prediction_vector)
 
         if apply_softmax:
             prediction_vector = F.softmax(prediction_vector, dim=1)
